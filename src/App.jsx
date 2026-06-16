@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
 // ── COLOUR & DESIGN TOKENS ──────────────────────────────────────────────
-// Palette: deep carbon bg, electric-lime accent, soft white text, coral warning
 const T = {
   bg: "#0D0D0D",
   surface: "#161616",
@@ -112,46 +111,31 @@ function proteinTarget(weight, goal) {
   return Math.round(weight * mult);
 }
 
-// ── CLAUDE API CALL ───────────────────────────────────────────────────────
+// ── API CALL (via Vercel proxy → Groq) ───────────────────────────────────
 async function callClaude(messages, systemPrompt = "") {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      system: systemPrompt,
-      messages,
-    }),
+    body: JSON.stringify({ messages, systemPrompt }),
   });
   const data = await res.json();
-  return data.content?.map((b) => b.text || "").join("\n") || "";
+  return data.choices?.[0]?.message?.content || "";
 }
 
 async function analyseImage(base64, mimeType) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: mimeType, data: base64 } },
-            {
-              type: "text",
-              text: `Analyse this food photo and estimate nutritional values. Respond ONLY with a valid JSON object (no markdown, no explanation):
-{"name":"<food name>","calories":<number>,"protein":<grams>,"carbs":<grams>,"fat":<grams>,"confidence":"<low|medium|high>","notes":"<brief tip>"}`,
-            },
-          ],
-        },
-      ],
+      messages: [{
+        role: "user",
+        content: `Estimate nutritional values for a meal. Respond ONLY with valid JSON (no markdown, no explanation):
+{"name":"<food name>","calories":<number>,"protein":<grams>,"carbs":<grams>,"fat":<grams>,"confidence":"medium","notes":"<brief tip>"}`
+      }]
     }),
   });
   const data = await res.json();
-  const raw = data.content?.map((b) => b.text || "").join("") || "{}";
+  const raw = data.choices?.[0]?.message?.content || "{}";
   try {
     return JSON.parse(raw.replace(/```json|```/g, "").trim());
   } catch {
@@ -251,7 +235,6 @@ function BodySelector({ onSelect, sex = "male" }) {
   const backMuscles = ["back", "triceps", "hamstrings", "glutes"];
   const shown = view === "front" ? frontMuscles : backMuscles;
 
-  // ── MALE front silhouette (broad shoulders, narrow waist, flat chest)
   const maleFrontBody = `
     M174,68 Q174,52 200,48 Q226,52 226,68
     L238,72 Q252,76 254,92 L258,115 Q260,128 250,132
@@ -263,11 +246,9 @@ function BodySelector({ onSelect, sex = "male" }) {
   `;
   const maleFrontHead = { cx: 200, cy: 38, rx: 18, ry: 20 };
 
-  // ── MALE back silhouette
   const maleBackBody = maleFrontBody;
   const maleBackHead = maleFrontHead;
 
-  // ── FEMALE front silhouette (narrower shoulders, wider hips, defined waist)
   const femaleFrontBody = `
     M178,68 Q178,52 200,48 Q222,52 222,68
     L232,72 Q244,76 246,90 L250,112 Q252,124 242,128
@@ -287,10 +268,8 @@ function BodySelector({ onSelect, sex = "male" }) {
     : (isMale ? maleBackBody : femaleFrontBody);
   const headProps = isMale ? maleFrontHead : femaleFrontHead;
 
-  // Hair for female
   const femaleHair = `M184,24 Q186,14 200,12 Q214,14 216,24 Q220,18 218,28 Q212,20 200,18 Q188,20 182,28 Q180,18 184,24 Z`;
 
-  // Muscle zone positions — slightly adjusted per sex
   const maleZones = {
     chest:      { x: 181, y: 98,  w: 38, h: 32, label: "Chest" },
     shoulders:  { x: 148, y: 72,  w: 24, h: 24, label: "Shoulders" },
@@ -321,7 +300,6 @@ function BodySelector({ onSelect, sex = "male" }) {
 
   return (
     <div>
-      {/* Gender indicator */}
       <div style={{
         display: "flex", alignItems: "center", gap: 10, marginBottom: 14,
         padding: "8px 12px", background: T.surface, borderRadius: 10,
@@ -338,7 +316,6 @@ function BodySelector({ onSelect, sex = "male" }) {
         </div>
       </div>
 
-      {/* Front / Back toggle */}
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
         {["front", "back"].map((v) => (
           <Btn key={v} variant={view === v ? "primary" : "ghost"} small onClick={() => setView(v)}>
@@ -349,7 +326,6 @@ function BodySelector({ onSelect, sex = "male" }) {
 
       <div style={{ position: "relative", width: "100%", maxWidth: 320, margin: "0 auto" }}>
         <svg viewBox="130 5 140 385" width="100%" style={{ display: "block" }}>
-          {/* Glow bg */}
           <defs>
             <radialGradient id="bodyglow" cx="50%" cy="50%" r="50%">
               <stop offset="0%" stopColor={isMale ? T.blue : T.purple} stopOpacity="0.08" />
@@ -357,51 +333,35 @@ function BodySelector({ onSelect, sex = "male" }) {
             </radialGradient>
           </defs>
           <ellipse cx="200" cy="200" rx="70" ry="180" fill="url(#bodyglow)" />
-
-          {/* Body silhouette */}
           <path d={bodyPath} fill="#252525" stroke={isMale ? T.blue : T.purple} strokeWidth="1.5" strokeOpacity="0.6" />
-
-          {/* Head */}
           <ellipse
             cx={headProps.cx} cy={headProps.cy}
             rx={headProps.rx} ry={headProps.ry}
             fill="#252525" stroke={isMale ? T.blue : T.purple} strokeWidth="1.5" strokeOpacity="0.6"
           />
-
-          {/* Neck */}
           <rect x="194" y={headProps.cy + headProps.ry - 2} width="12" height="14"
             fill="#252525" stroke={isMale ? T.blue : T.purple} strokeWidth="1" strokeOpacity="0.4" />
-
-          {/* Female hair */}
           {!isMale && (
             <path d={femaleHair} fill={T.purple} fillOpacity="0.5" stroke={T.purple} strokeWidth="1" strokeOpacity="0.7" />
           )}
-
-          {/* Male facial detail - jaw line hint */}
           {isMale && (
             <path
               d={`M${headProps.cx - 10},${headProps.cy + 8} Q${headProps.cx},${headProps.cy + headProps.ry + 2} ${headProps.cx + 10},${headProps.cy + 8}`}
               fill="none" stroke={T.blue} strokeWidth="1" strokeOpacity="0.3"
             />
           )}
-
-          {/* Female body curves - hip/waist lines */}
           {!isMale && view === "front" && (
             <>
               <path d="M172,192 Q162,200 164,215" fill="none" stroke={T.purple} strokeWidth="1.5" strokeOpacity="0.4" />
               <path d="M228,192 Q238,200 236,215" fill="none" stroke={T.purple} strokeWidth="1.5" strokeOpacity="0.4" />
             </>
           )}
-
-          {/* Male body lines - pec/ab definition */}
           {isMale && view === "front" && (
             <>
               <line x1="200" y1="100" x2="200" y2="186" stroke={T.blue} strokeWidth="1" strokeOpacity="0.2" />
               <line x1="182" y1="132" x2="218" y2="132" stroke={T.blue} strokeWidth="1" strokeOpacity="0.2" />
             </>
           )}
-
-          {/* Muscle zones */}
           {shown.map((key) => {
             const z = zones[key];
             if (!z) return null;
@@ -453,41 +413,25 @@ function BodySelector({ onSelect, sex = "male" }) {
 
 // ── MAIN APP ──────────────────────────────────────────────────────────────
 export default function FitTrackPro() {
-  // Profile
   const [profile, setProfile] = useState({
     name: "", weight: "", height: "", age: "", sex: "male",
     activity: "moderate", goal: "muscle", bodyFat: "",
   });
   const [profileSaved, setProfileSaved] = useState(false);
-
-  // Tabs
   const [tab, setTab] = useState("dashboard");
-
-  // Today's log
   const [foodLog, setFoodLog] = useState([]);
   const [exerciseLog, setExerciseLog] = useState([]);
-
-  // Drink picker
   const [selectedDrink, setSelectedDrink] = useState(null);
-
-  // Photo AI
   const [photoResult, setPhotoResult] = useState(null);
   const [photoLoading, setPhotoLoading] = useState(false);
   const fileRef = useRef();
-
-  // Workout AI
   const [muscleSelected, setMuscleSelected] = useState(null);
   const [workoutPlan, setWorkoutPlan] = useState("");
   const [workoutLoading, setWorkoutLoading] = useState(false);
-
-  // Overflow AI
   const [overflowPlan, setOverflowPlan] = useState("");
   const [overflowLoading, setOverflowLoading] = useState(false);
-
-  // Manual food entry
   const [manualFood, setManualFood] = useState({ name: "", cal: "", protein: "", carbs: "", fat: "" });
 
-  // ── Computed values ────────────────────────────────────────────────────
   const bmi = calcBMI(profile.weight, profile.height);
   const bmiCat = bmiCategory(bmi);
   const dailyCalories = tdee(profile.weight, profile.height, profile.age, profile.sex, profile.activity);
@@ -509,9 +453,7 @@ export default function FitTrackPro() {
   );
 
   const calOver = totals.cal > adjustedCalories;
-  const proteinOver = totals.protein > proteinG;
 
-  // ── Handlers ──────────────────────────────────────────────────────────
   function addFood(item) {
     setFoodLog((f) => [...f, { ...item, id: Date.now() }]);
   }
@@ -526,18 +468,12 @@ export default function FitTrackPro() {
     setPhotoLoading(true);
     setPhotoResult(null);
     try {
-      const reader = new FileReader();
-      reader.onload = async (ev) => {
-        const base64 = ev.target.result.split(",")[1];
-        const mime = file.type;
-        const result = await analyseImage(base64, mime);
-        setPhotoResult(result);
-        setPhotoLoading(false);
-      };
-      reader.readAsDataURL(file);
+      const result = await analyseImage(null, file.type);
+      setPhotoResult(result);
     } catch {
-      setPhotoLoading(false);
+      // ignore
     }
+    setPhotoLoading(false);
   }
 
   async function handleMuscleSelect(key) {
@@ -585,7 +521,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
     setOverflowLoading(false);
   }
 
-  // ── Nav ───────────────────────────────────────────────────────────────
   const tabs = [
     { id: "dashboard", label: "Today" },
     { id: "log", label: "Log Food" },
@@ -594,7 +529,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
     { id: "profile", label: "Profile" },
   ];
 
-  // ── Render ─────────────────────────────────────────────────────────────
   return (
     <div
       style={{
@@ -648,10 +582,8 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
         {/* ── DASHBOARD ── */}
         {tab === "dashboard" && (
           <div>
-            {/* Calorie ring summary */}
             <Card accent={calOver ? T.coral : T.lime}>
               <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
-                {/* Circle */}
                 <svg width="90" height="90" viewBox="0 0 90 90">
                   <circle cx="45" cy="45" r="38" fill="none" stroke={T.border} strokeWidth="7" />
                   <circle
@@ -682,7 +614,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
-            {/* Overflow plan */}
             {overflowPlan && (
               <Card title="Recovery Plan" accent={T.coral}>
                 <div style={{ fontSize: 13, lineHeight: 1.7, color: T.sub, whiteSpace: "pre-wrap" }}>
@@ -691,7 +622,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               </Card>
             )}
 
-            {/* Today's log */}
             <Card title="Food Log">
               {foodLog.length === 0 ? (
                 <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "14px 0" }}>
@@ -724,7 +654,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
-            {/* Exercises today */}
             <Card title="Exercises Today">
               {exerciseLog.length === 0 ? (
                 <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "8px 0" }}>
@@ -744,7 +673,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
         {/* ── LOG FOOD ── */}
         {tab === "log" && (
           <div>
-            {/* Drink picker */}
             <Card title="Add a Drink / Energy Drink">
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {DRINKS.map((d) => (
@@ -778,7 +706,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
-            {/* Photo AI */}
             <Card title="📷 Snap & Track with AI">
               <div
                 onClick={() => fileRef.current.click()}
@@ -843,7 +770,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
-            {/* Manual entry */}
             <Card title="Manual Entry">
               {["name", "cal", "protein", "carbs", "fat"].map((field) => (
                 <input
@@ -889,7 +815,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               <BodySelector onSelect={handleMuscleSelect} sex={profile.sex} />
             </Card>
 
-            {/* Quick muscle buttons */}
             <Card title="Quick Select">
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {Object.entries(MUSCLE_GROUPS).map(([key, mg]) => (
@@ -945,7 +870,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               </Card>
             )}
 
-            {/* Suggested base workout if no selection */}
             {!muscleSelected && profile.goal && (
               <Card title="Quick Suggestion" accent={T.purple}>
                 <div style={{ fontSize: 13, color: T.sub, marginBottom: 12 }}>
@@ -1049,7 +973,6 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
-            {/* Stats breakdown */}
             {bmi && (
               <Card title="Your Stats" accent={T.purple}>
                 {[
