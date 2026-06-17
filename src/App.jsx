@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
 // ── COLOUR & DESIGN TOKENS ──────────────────────────────────────────────
+// Palette: deep carbon bg, electric-lime accent, soft white text, coral warning
 const T = {
   bg: "#0D0D0D",
   surface: "#161616",
@@ -99,10 +100,13 @@ function bmiCategory(bmi) {
 }
 function tdee(weight, height, age, sex, activity) {
   if (!weight || !height || !age) return 2000;
+  // prefer_not: use average of male and female BMR formulas
   let bmr =
     sex === "male"
       ? 10 * weight + 6.25 * height - 5 * age + 5
-      : 10 * weight + 6.25 * height - 5 * age - 161;
+      : sex === "female"
+      ? 10 * weight + 6.25 * height - 5 * age - 161
+      : 10 * weight + 6.25 * height - 5 * age - 78; // midpoint average
   const factors = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, very: 1.9 };
   return Math.round(bmr * (factors[activity] || 1.55));
 }
@@ -111,36 +115,237 @@ function proteinTarget(weight, goal) {
   return Math.round(weight * mult);
 }
 
-// ── API CALL (via Vercel proxy → Groq) ───────────────────────────────────
-async function callClaude(messages, systemPrompt = "") {
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, systemPrompt }),
-  });
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "";
-}
+// ── CLAUDE API CALL ───────────────────────────────────────────────────────
+const API_KEY = "YOUR_API_KEY_HERE"; // ← paste your key from console.anthropic.com
 
-async function analyseImage(base64, mimeType) {
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages: [{
-        role: "user",
-        content: `Estimate nutritional values for a meal. Respond ONLY with valid JSON (no markdown, no explanation):
-{"name":"<food name>","calories":<number>,"protein":<grams>,"carbs":<grams>,"fat":<grams>,"confidence":"medium","notes":"<brief tip>"}`
-      }]
-    }),
-  });
-  const data = await res.json();
-  const raw = data.choices?.[0]?.message?.content || "{}";
+async function callClaude(messages, systemPrompt = "") {
   try {
-    return JSON.parse(raw.replace(/```json|```/g, "").trim());
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-calls": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        system: systemPrompt,
+        messages,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.content?.map((b) => b.text || "").join("\n") || null;
   } catch {
     return null;
   }
+}
+
+async function analyseImage(base64, mimeType) {
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-calls": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: mimeType, data: base64 } },
+              {
+                type: "text",
+                text: `Analyse this food photo and estimate nutritional values. Respond ONLY with a valid JSON object (no markdown, no explanation):
+{"name":"<food name>","calories":<number>,"protein":<grams>,"carbs":<grams>,"fat":<grams>,"confidence":"<low|medium|high>","notes":"<brief tip>"}`,
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const raw = data.content?.map((b) => b.text || "").join("") || "{}";
+    try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
+    catch { return null; }
+  } catch {
+    return null;
+  }
+}
+
+// ── BUILT-IN FALLBACK WORKOUT GENERATOR (works with NO API key) ───────────
+const WORKOUT_DB = {
+  chest: [
+    { name: "Bench Press", sets: "4x8", tip: "Drive feet into floor, retract shoulder blades" },
+    { name: "Incline Dumbbell Press", sets: "3x10", tip: "30-45 degree incline targets upper chest" },
+    { name: "Cable Fly", sets: "3x12", tip: "Keep slight elbow bend, squeeze at centre" },
+    { name: "Push-Ups", sets: "3x15", tip: "Hands slightly wider than shoulder width" },
+    { name: "Dips", sets: "3x10", tip: "Lean forward slightly to hit chest over triceps" },
+  ],
+  shoulders: [
+    { name: "Overhead Press", sets: "4x8", tip: "Brace core, do not arch lower back" },
+    { name: "Lateral Raises", sets: "4x12", tip: "Lead with elbows, slight forward lean" },
+    { name: "Front Raises", sets: "3x12", tip: "Control the descent, do not swing" },
+    { name: "Arnold Press", sets: "3x10", tip: "Rotate palms out as you press up" },
+    { name: "Face Pulls", sets: "3x15", tip: "Pull to nose level, elbows high" },
+  ],
+  biceps: [
+    { name: "Barbell Curl", sets: "4x10", tip: "Keep elbows pinned at sides" },
+    { name: "Hammer Curl", sets: "3x12", tip: "Neutral grip hits brachialis too" },
+    { name: "Incline Dumbbell Curl", sets: "3x10", tip: "Full stretch at bottom" },
+    { name: "Concentration Curl", sets: "3x12", tip: "Elbow on inner thigh for isolation" },
+    { name: "Cable Curl", sets: "3x15", tip: "Constant tension throughout range" },
+  ],
+  triceps: [
+    { name: "Skull Crushers", sets: "4x10", tip: "Lower bar to forehead, elbows in" },
+    { name: "Rope Pushdown", sets: "4x12", tip: "Flare hands out at bottom" },
+    { name: "Close-Grip Bench", sets: "3x8", tip: "Hands shoulder-width, elbows in" },
+    { name: "Overhead Tricep Extension", sets: "3x12", tip: "Keep elbows close to head" },
+    { name: "Tricep Dips", sets: "3x10", tip: "Stay upright to isolate triceps" },
+  ],
+  abs: [
+    { name: "Plank", sets: "3x45s", tip: "Squeeze glutes and brace core hard" },
+    { name: "Cable Crunch", sets: "4x15", tip: "Round spine, crunch to hips" },
+    { name: "Hanging Leg Raise", sets: "3x12", tip: "Control the swing, slow descent" },
+    { name: "Russian Twists", sets: "3x20", tip: "Feet off floor for more challenge" },
+    { name: "Ab Wheel Rollout", sets: "3x10", tip: "Brace hard, do not let hips sag" },
+  ],
+  back: [
+    { name: "Deadlift", sets: "4x5", tip: "Bar over mid-foot, neutral spine" },
+    { name: "Pull-Ups", sets: "4x8", tip: "Full hang at bottom, chin over bar" },
+    { name: "Bent-Over Row", sets: "4x8", tip: "Hinge at hips, pull to belly button" },
+    { name: "Lat Pulldown", sets: "3x12", tip: "Lean back slightly, pull to chest" },
+    { name: "Seated Cable Row", sets: "3x12", tip: "Squeeze shoulder blades together" },
+  ],
+  quads: [
+    { name: "Back Squat", sets: "4x8", tip: "Break at hips and knees simultaneously" },
+    { name: "Leg Press", sets: "4x10", tip: "Feet shoulder-width, do not lock knees" },
+    { name: "Lunges", sets: "3x12 each", tip: "Front shin vertical, torso upright" },
+    { name: "Leg Extension", sets: "3x15", tip: "Slow on the way down, squeeze at top" },
+    { name: "Bulgarian Split Squat", sets: "3x10 each", tip: "Back foot elevated, drop straight down" },
+  ],
+  hamstrings: [
+    { name: "Romanian Deadlift", sets: "4x10", tip: "Hinge at hips, feel hamstring stretch" },
+    { name: "Lying Leg Curl", sets: "4x12", tip: "Full range, control the return" },
+    { name: "Stiff-Leg Deadlift", sets: "3x10", tip: "Keep legs nearly straight" },
+    { name: "Nordic Curl", sets: "3x6", tip: "One of the best hamstring builders" },
+    { name: "Good Mornings", sets: "3x12", tip: "Light weight, focus on hip hinge" },
+  ],
+  glutes: [
+    { name: "Hip Thrust", sets: "4x12", tip: "Drive through heels, squeeze at top" },
+    { name: "Glute Bridge", sets: "3x15", tip: "Hold 2s at top, full hip extension" },
+    { name: "Cable Kickback", sets: "3x15 each", tip: "Keep hips level, squeeze hard" },
+    { name: "Sumo Deadlift", sets: "4x8", tip: "Wide stance, toes out 45 degrees" },
+    { name: "Step-Ups", sets: "3x12 each", tip: "Drive through heel of elevated foot" },
+  ],
+  calves: [
+    { name: "Standing Calf Raise", sets: "4x15", tip: "Full stretch at bottom, pause at top", gym: true, home: true },
+    { name: "Seated Calf Raise", sets: "4x20", tip: "Slow tempo, constant tension", gym: true, home: false },
+    { name: "Donkey Calf Raise", sets: "3x15", tip: "Bent-over position stretches gastroc more", gym: true, home: true },
+    { name: "Single-Leg Calf Raise", sets: "3x12 each", tip: "Hold wall for balance only", gym: true, home: true },
+  ],
+};
+
+// Home-only exercise alternatives
+const HOME_WORKOUTS = {
+  chest: [
+    { name: "Push-Ups", sets: "4x20", tip: "Hands shoulder-width, lower chest to floor" },
+    { name: "Wide Push-Ups", sets: "3x15", tip: "Wide grip targets outer chest" },
+    { name: "Diamond Push-Ups", sets: "3x12", tip: "Hands touching under chest, targets inner pec" },
+    { name: "Decline Push-Ups", sets: "3x15", tip: "Feet elevated on chair targets upper chest" },
+    { name: "Pike Push-Up", sets: "3x12", tip: "Hips high, targets shoulders and chest" },
+  ],
+  shoulders: [
+    { name: "Pike Push-Up", sets: "4x12", tip: "Hips high in inverted V position" },
+    { name: "Wall Handstand Hold", sets: "3x20s", tip: "Build pressing strength safely" },
+    { name: "Lateral Raises (Water Bottles)", sets: "4x15", tip: "Use filled bottles as weights" },
+    { name: "Arnold Press (Water Bottles)", sets: "3x12", tip: "Rotate palms as you press" },
+    { name: "Rear Delt Circle", sets: "3x20", tip: "Arms out, small circles, feel the burn" },
+  ],
+  biceps: [
+    { name: "Towel Curl", sets: "4x12", tip: "Loop towel under foot, curl up with both hands" },
+    { name: "Backpack Curl", sets: "3x15", tip: "Fill a bag with books for resistance" },
+    { name: "Isometric Bicep Hold", sets: "3x30s", tip: "Pull up on a table edge, hold" },
+    { name: "Chin-Ups (door frame)", sets: "3x8", tip: "Use a door pull-up bar if available" },
+    { name: "Hammer Curl (Bottles)", sets: "3x15", tip: "Neutral grip with water bottles" },
+  ],
+  triceps: [
+    { name: "Chair Dips", sets: "4x15", tip: "Hands on chair behind you, lower body down" },
+    { name: "Diamond Push-Ups", sets: "3x15", tip: "Hands close together under chest" },
+    { name: "Tricep Push-Up", sets: "3x12", tip: "Elbows tight to sides throughout" },
+    { name: "Overhead Tricep Extension (Bottle)", sets: "3x15", tip: "One arm at a time, keep elbow high" },
+    { name: "Floor Tricep Press", sets: "3x12", tip: "Lower forearms to floor then press up" },
+  ],
+  abs: [
+    { name: "Plank", sets: "3x60s", tip: "Squeeze glutes and brace core hard" },
+    { name: "Crunches", sets: "4x25", tip: "Hands behind head, crunch up not sit up" },
+    { name: "Leg Raises", sets: "4x15", tip: "Lying flat, raise legs to 90 degrees" },
+    { name: "Mountain Climbers", sets: "3x30s", tip: "Fast pace for cardio effect" },
+    { name: "Russian Twists", sets: "3x20", tip: "Feet off floor, twist side to side" },
+  ],
+  back: [
+    { name: "Superman Hold", sets: "4x15", tip: "Lie face down, lift arms and legs together" },
+    { name: "Door Pull-Up", sets: "4x8", tip: "Use a doorframe pull-up bar" },
+    { name: "Towel Row", sets: "3x15", tip: "Loop towel around door handle, lean back and row" },
+    { name: "Good Mornings (bodyweight)", sets: "3x20", tip: "Hinge at hips, feel hamstring and lower back" },
+    { name: "Bird Dog", sets: "3x12 each", tip: "On all fours, extend opposite arm and leg" },
+  ],
+  quads: [
+    { name: "Bodyweight Squat", sets: "4x20", tip: "Sit back into the squat, chest up" },
+    { name: "Jump Squat", sets: "3x15", tip: "Explode up, land softly" },
+    { name: "Lunges", sets: "3x15 each", tip: "Long step, front shin vertical" },
+    { name: "Wall Sit", sets: "3x45s", tip: "Thighs parallel to floor, back flat" },
+    { name: "Step-Ups (chair)", sets: "3x15 each", tip: "Drive through heel as you step up" },
+  ],
+  hamstrings: [
+    { name: "Romanian Deadlift (Backpack)", sets: "3x15", tip: "Hinge at hips, feel the stretch" },
+    { name: "Nordic Curl (sofa)", sets: "3x6", tip: "Hook feet under sofa, lower slowly" },
+    { name: "Single-Leg Deadlift", sets: "3x12 each", tip: "Balance challenge, hinge with control" },
+    { name: "Glute Bridge", sets: "4x20", tip: "Drive hips up, squeeze at the top" },
+    { name: "Reverse Lunge", sets: "3x15 each", tip: "Step back, drop knee close to floor" },
+  ],
+  glutes: [
+    { name: "Glute Bridge", sets: "4x20", tip: "Push through heels, hold 2s at top" },
+    { name: "Donkey Kicks", sets: "4x15 each", tip: "On all fours, kick heel to ceiling" },
+    { name: "Fire Hydrant", sets: "3x20 each", tip: "On all fours, lift knee out to side" },
+    { name: "Single-Leg Glute Bridge", sets: "3x15 each", tip: "One leg extended, drive hip up" },
+    { name: "Sumo Squat", sets: "4x15", tip: "Wide stance, toes out 45 degrees, squat deep" },
+  ],
+  calves: [
+    { name: "Standing Calf Raise", sets: "4x25", tip: "Use a step for full range of motion" },
+    { name: "Single-Leg Calf Raise", sets: "3x20 each", tip: "Hold wall for balance only" },
+    { name: "Jump Rope (or mimic)", sets: "3x60s", tip: "Stay on toes throughout" },
+    { name: "Stair Calf Raise", sets: "4x20", tip: "Use bottom step, full range" },
+  ],
+};
+
+// YouTube search URLs — open in new tab, no embed blocking
+function getVideoUrl(exerciseName) {
+  return "https://www.youtube.com/results?search_query=" + encodeURIComponent(exerciseName + " exercise tutorial form");
+}
+
+function buildFallbackWorkout(muscleKey, profile) {
+  const equipment = profile.equipment || "gym";
+  const source = equipment === "home"
+    ? (HOME_WORKOUTS[muscleKey] || WORKOUT_DB[muscleKey] || [])
+    : WORKOUT_DB[muscleKey] || [];
+  const goal = profile.goal;
+  const picked = source.slice(0, goal === "lose" ? 5 : 4);
+  const adjusted = picked.map(ex => {
+    let sets = ex.sets;
+    if (goal === "lose") sets = sets.replace(/x(\d+)/, (m, n) => `x${parseInt(n) + 2}`);
+    if (goal === "muscle") sets = sets.replace(/(\d+)x/, (m, n) => `${Math.min(5, parseInt(n) + 1)}x`);
+    return { ...ex, sets };
+  });
+  return adjusted;
 }
 
 // ── SUBCOMPONENTS ─────────────────────────────────────────────────────────
@@ -235,6 +440,7 @@ function BodySelector({ onSelect, sex = "male" }) {
   const backMuscles = ["back", "triceps", "hamstrings", "glutes"];
   const shown = view === "front" ? frontMuscles : backMuscles;
 
+  // ── MALE front silhouette (broad shoulders, narrow waist, flat chest)
   const maleFrontBody = `
     M174,68 Q174,52 200,48 Q226,52 226,68
     L238,72 Q252,76 254,92 L258,115 Q260,128 250,132
@@ -246,9 +452,11 @@ function BodySelector({ onSelect, sex = "male" }) {
   `;
   const maleFrontHead = { cx: 200, cy: 38, rx: 18, ry: 20 };
 
+  // ── MALE back silhouette
   const maleBackBody = maleFrontBody;
   const maleBackHead = maleFrontHead;
 
+  // ── FEMALE front silhouette (narrower shoulders, wider hips, defined waist)
   const femaleFrontBody = `
     M178,68 Q178,52 200,48 Q222,52 222,68
     L232,72 Q244,76 246,90 L250,112 Q252,124 242,128
@@ -262,14 +470,16 @@ function BodySelector({ onSelect, sex = "male" }) {
   `;
   const femaleFrontHead = { cx: 200, cy: 37, rx: 16, ry: 19 };
 
-  const isMale = sex === "male";
+  const isMale = sex !== "female"; // prefer_not defaults to male silhouette
   const bodyPath = view === "front"
     ? (isMale ? maleFrontBody : femaleFrontBody)
     : (isMale ? maleBackBody : femaleFrontBody);
   const headProps = isMale ? maleFrontHead : femaleFrontHead;
 
+  // Hair for female
   const femaleHair = `M184,24 Q186,14 200,12 Q214,14 216,24 Q220,18 218,28 Q212,20 200,18 Q188,20 182,28 Q180,18 184,24 Z`;
 
+  // Muscle zone positions — slightly adjusted per sex
   const maleZones = {
     chest:      { x: 181, y: 98,  w: 38, h: 32, label: "Chest" },
     shoulders:  { x: 148, y: 72,  w: 24, h: 24, label: "Shoulders" },
@@ -300,6 +510,7 @@ function BodySelector({ onSelect, sex = "male" }) {
 
   return (
     <div>
+      {/* Gender indicator */}
       <div style={{
         display: "flex", alignItems: "center", gap: 10, marginBottom: 14,
         padding: "8px 12px", background: T.surface, borderRadius: 10,
@@ -316,6 +527,7 @@ function BodySelector({ onSelect, sex = "male" }) {
         </div>
       </div>
 
+      {/* Front / Back toggle */}
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
         {["front", "back"].map((v) => (
           <Btn key={v} variant={view === v ? "primary" : "ghost"} small onClick={() => setView(v)}>
@@ -326,6 +538,7 @@ function BodySelector({ onSelect, sex = "male" }) {
 
       <div style={{ position: "relative", width: "100%", maxWidth: 320, margin: "0 auto" }}>
         <svg viewBox="130 5 140 385" width="100%" style={{ display: "block" }}>
+          {/* Glow bg */}
           <defs>
             <radialGradient id="bodyglow" cx="50%" cy="50%" r="50%">
               <stop offset="0%" stopColor={isMale ? T.blue : T.purple} stopOpacity="0.08" />
@@ -333,35 +546,51 @@ function BodySelector({ onSelect, sex = "male" }) {
             </radialGradient>
           </defs>
           <ellipse cx="200" cy="200" rx="70" ry="180" fill="url(#bodyglow)" />
+
+          {/* Body silhouette */}
           <path d={bodyPath} fill="#252525" stroke={isMale ? T.blue : T.purple} strokeWidth="1.5" strokeOpacity="0.6" />
+
+          {/* Head */}
           <ellipse
             cx={headProps.cx} cy={headProps.cy}
             rx={headProps.rx} ry={headProps.ry}
             fill="#252525" stroke={isMale ? T.blue : T.purple} strokeWidth="1.5" strokeOpacity="0.6"
           />
+
+          {/* Neck */}
           <rect x="194" y={headProps.cy + headProps.ry - 2} width="12" height="14"
             fill="#252525" stroke={isMale ? T.blue : T.purple} strokeWidth="1" strokeOpacity="0.4" />
+
+          {/* Female hair */}
           {!isMale && (
             <path d={femaleHair} fill={T.purple} fillOpacity="0.5" stroke={T.purple} strokeWidth="1" strokeOpacity="0.7" />
           )}
+
+          {/* Male facial detail - jaw line hint */}
           {isMale && (
             <path
               d={`M${headProps.cx - 10},${headProps.cy + 8} Q${headProps.cx},${headProps.cy + headProps.ry + 2} ${headProps.cx + 10},${headProps.cy + 8}`}
               fill="none" stroke={T.blue} strokeWidth="1" strokeOpacity="0.3"
             />
           )}
+
+          {/* Female body curves - hip/waist lines */}
           {!isMale && view === "front" && (
             <>
               <path d="M172,192 Q162,200 164,215" fill="none" stroke={T.purple} strokeWidth="1.5" strokeOpacity="0.4" />
               <path d="M228,192 Q238,200 236,215" fill="none" stroke={T.purple} strokeWidth="1.5" strokeOpacity="0.4" />
             </>
           )}
+
+          {/* Male body lines - pec/ab definition */}
           {isMale && view === "front" && (
             <>
               <line x1="200" y1="100" x2="200" y2="186" stroke={T.blue} strokeWidth="1" strokeOpacity="0.2" />
               <line x1="182" y1="132" x2="218" y2="132" stroke={T.blue} strokeWidth="1" strokeOpacity="0.2" />
             </>
           )}
+
+          {/* Muscle zones */}
           {shown.map((key) => {
             const z = zones[key];
             if (!z) return null;
@@ -413,25 +642,55 @@ function BodySelector({ onSelect, sex = "male" }) {
 
 // ── MAIN APP ──────────────────────────────────────────────────────────────
 export default function FitTrackPro() {
-  const [profile, setProfile] = useState({
-    name: "", weight: "", height: "", age: "", sex: "male",
-    activity: "moderate", goal: "muscle", bodyFat: "",
+  // Profile
+  const [profile, setProfile] = useState(() => {
+    try { const s = localStorage.getItem("fittrack_profile"); return s ? JSON.parse(s) : { name: "", weight: "", height: "", age: "", sex: "male", activity: "moderate", goal: "muscle", bodyFat: "", desiredWeight: "", desiredBodyFat: "", equipment: "gym" }; }
+    catch { return { name: "", weight: "", height: "", age: "", sex: "male", activity: "moderate", goal: "muscle", bodyFat: "", desiredWeight: "", desiredBodyFat: "", equipment: "gym" }; }
   });
   const [profileSaved, setProfileSaved] = useState(false);
+
+  // Tabs
   const [tab, setTab] = useState("dashboard");
-  const [foodLog, setFoodLog] = useState([]);
-  const [exerciseLog, setExerciseLog] = useState([]);
+
+  // Today's log — persisted
+  const todayKey = "fittrack_food_" + new Date().toISOString().slice(0,10);
+  const exKey = "fittrack_ex_" + new Date().toISOString().slice(0,10);
+  const [foodLog, setFoodLog] = useState(() => {
+    try { const s = localStorage.getItem(todayKey); return s ? JSON.parse(s) : []; } catch { return []; }
+  });
+  const [exerciseLog, setExerciseLog] = useState(() => {
+    try { const s = localStorage.getItem(exKey); return s ? JSON.parse(s) : []; } catch { return []; }
+  });
+
+  // Drink picker
   const [selectedDrink, setSelectedDrink] = useState(null);
+
+  // Photo AI
   const [photoResult, setPhotoResult] = useState(null);
   const [photoLoading, setPhotoLoading] = useState(false);
   const fileRef = useRef();
+
+  // Workout AI
   const [muscleSelected, setMuscleSelected] = useState(null);
   const [workoutPlan, setWorkoutPlan] = useState("");
+  const [workoutExercises, setWorkoutExercises] = useState([]);
   const [workoutLoading, setWorkoutLoading] = useState(false);
+  const [workoutTab, setWorkoutTab] = useState("ai"); // "ai" | "custom"
+  const [customInput, setCustomInput] = useState("");
+  const [customPlan, setCustomPlan] = useState([]);
+  const [customLoading, setCustomLoading] = useState(false);
+  const [savedWorkouts, setSavedWorkouts] = useState(() => {
+    try { const s = localStorage.getItem("fittrack_saved_workouts"); return s ? JSON.parse(s) : []; } catch { return []; }
+  });
+
+  // Overflow AI
   const [overflowPlan, setOverflowPlan] = useState("");
   const [overflowLoading, setOverflowLoading] = useState(false);
+
+  // Manual food entry
   const [manualFood, setManualFood] = useState({ name: "", cal: "", protein: "", carbs: "", fat: "" });
 
+  // ── Computed values ────────────────────────────────────────────────────
   const bmi = calcBMI(profile.weight, profile.height);
   const bmiCat = bmiCategory(bmi);
   const dailyCalories = tdee(profile.weight, profile.height, profile.age, profile.sex, profile.activity);
@@ -453,13 +712,23 @@ export default function FitTrackPro() {
   );
 
   const calOver = totals.cal > adjustedCalories;
+  const proteinOver = totals.protein > proteinG;
 
+  // ── Handlers ──────────────────────────────────────────────────────────
   function addFood(item) {
-    setFoodLog((f) => [...f, { ...item, id: Date.now() }]);
+    setFoodLog((f) => {
+      const next = [...f, { ...item, id: Date.now() }];
+      try { localStorage.setItem(todayKey, JSON.stringify(next)); } catch {}
+      return next;
+    });
   }
 
   function removeFood(id) {
-    setFoodLog((f) => f.filter((x) => x.id !== id));
+    setFoodLog((f) => {
+      const next = f.filter((x) => x.id !== id);
+      try { localStorage.setItem(todayKey, JSON.stringify(next)); } catch {}
+      return next;
+    });
   }
 
   async function handlePhoto(e) {
@@ -468,26 +737,83 @@ export default function FitTrackPro() {
     setPhotoLoading(true);
     setPhotoResult(null);
     try {
-      const result = await analyseImage(null, file.type);
-      setPhotoResult(result);
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        const base64 = ev.target.result.split(",")[1];
+        const mime = file.type;
+        const result = await analyseImage(base64, mime);
+        setPhotoResult(result);
+        setPhotoLoading(false);
+      };
+      reader.readAsDataURL(file);
     } catch {
-      // ignore
+      setPhotoLoading(false);
     }
-    setPhotoLoading(false);
   }
 
   async function handleMuscleSelect(key) {
     setMuscleSelected(key);
     setWorkoutLoading(true);
     setWorkoutPlan("");
+    setWorkoutExercises([]);
+    setTab("workout");
     const mg = MUSCLE_GROUPS[key];
+
+    // Always build fallback immediately so user sees something instantly
+    const fallback = buildFallbackWorkout(key, profile);
+    setWorkoutExercises(fallback);
+    setWorkoutLoading(false);
+
+    // Try AI enhancement in background
     const prompt = `The user wants to train their ${mg.label}.
 Profile: Goal=${profile.goal}, BMI=${bmi}(${bmiCat}), Weight=${profile.weight}kg, Activity=${profile.activity}.
-Suggest a concise, effective ${mg.label} workout (4-6 exercises). Include sets, reps, and a brief coaching tip per exercise. Keep it motivating and practical.`;
-    const plan = await callClaude([{ role: "user", content: prompt }]);
-    setWorkoutPlan(plan);
-    setWorkoutLoading(false);
-    setTab("workout");
+${profile.desiredWeight ? "Desired weight: " + profile.desiredWeight + "kg." : ""}
+${profile.desiredBodyFat ? "Desired body fat: " + profile.desiredBodyFat + "%." : ""}
+Give a 2-sentence personalised coaching note for this specific person doing ${mg.label} training. Be direct and motivating. Max 60 words.`;
+    const aiNote = await callClaude([{ role: "user", content: prompt }]);
+    if (aiNote) setWorkoutPlan(aiNote);
+  }
+
+  async function handleCustomWorkout() {
+    if (!customInput.trim()) return;
+    setCustomLoading(true);
+    setCustomPlan([]);
+
+    // Try AI first
+    const equipLabel = profile.equipment === "home" ? "home (no equipment, bodyweight only)" : profile.equipment === "both" ? "gym or home" : "gym (full equipment)";
+    const prompt = `The user wants to do this workout: "${customInput}"
+Their profile: Goal=${profile.goal}, Weight=${profile.weight}kg, BMI=${bmi}, Equipment: ${equipLabel}.
+${profile.desiredWeight ? "Desired weight: " + profile.desiredWeight + "kg." : ""}
+${profile.desiredBodyFat ? "Desired body fat: " + profile.desiredBodyFat + "%." : ""}
+IMPORTANT: Only suggest exercises appropriate for ${equipLabel}.
+Return ONLY a JSON array of 4-6 exercise objects like:
+[{"name":"Exercise Name","sets":"3x12","tip":"coaching tip here"}]
+No markdown, no explanation, just the JSON array.`;
+
+    const aiResult = await callClaude([{ role: "user", content: prompt }]);
+    let exercises = [];
+    if (aiResult) {
+      try {
+        const clean = aiResult.replace(/\`\`\`json|\`\`\`/g, "").trim();
+        exercises = JSON.parse(clean);
+      } catch {}
+    }
+
+    // Fallback: parse keywords and match from WORKOUT_DB
+    if (!exercises.length) {
+      const input = customInput.toLowerCase();
+      const allExercises = Object.values(WORKOUT_DB).flat();
+      exercises = allExercises.filter(ex =>
+        input.split(/\s+/).some(word => ex.name.toLowerCase().includes(word))
+      ).slice(0, 5);
+      if (!exercises.length) {
+        // Generic fallback based on goal
+        exercises = buildFallbackWorkout("abs", profile).concat(buildFallbackWorkout("chest", profile)).slice(0, 5);
+      }
+    }
+
+    setCustomPlan(exercises);
+    setCustomLoading(false);
   }
 
   async function handleOverflowPlan() {
@@ -506,14 +832,16 @@ Suggest a concise, effective ${mg.label} workout (4-6 exercises). Include sets, 
     const prompt = `A person has exceeded their daily targets. Here is their situation:
 Goal: ${profile.goal === "muscle" ? "Build muscle" : profile.goal === "lose" ? "Lose weight" : "Maintain weight"}
 BMI: ${bmi} (${bmiCat})
+${profile.desiredWeight ? "Desired weight: " + profile.desiredWeight + "kg (currently " + profile.weight + "kg)" : ""}
+${profile.desiredBodyFat ? "Desired body fat: " + profile.desiredBodyFat + "% (currently " + (profile.bodyFat || "unknown") + "%)" : ""}
 What they exceeded: ${exceeded.join(", ")}
 Today's food log: ${foodLog.map((f) => f.name).join(", ")}
 Exercise done today: ${exerciseLog.join(", ") || "None"}
 
 Give them:
-1. A brief explanation of what this means for their goal
+1. A brief explanation of what this means for their specific goal and desired targets
 2. 2-3 practical ways to balance this (not guilt-tripping)
-3. A specific bonus workout or activity to help offset the excess
+3. A specific bonus workout to help offset the excess, tailored to their goal
 Keep it supportive, direct, and actionable. Max 250 words.`;
 
     const plan = await callClaude([{ role: "user", content: prompt }]);
@@ -521,6 +849,7 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
     setOverflowLoading(false);
   }
 
+  // ── Nav ───────────────────────────────────────────────────────────────
   const tabs = [
     { id: "dashboard", label: "Today" },
     { id: "log", label: "Log Food" },
@@ -529,6 +858,13 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
     { id: "profile", label: "Profile" },
   ];
 
+  function saveProfile() {
+    try { localStorage.setItem("fittrack_profile", JSON.stringify(profile)); } catch {}
+    setProfileSaved(true);
+    setTimeout(() => setProfileSaved(false), 2500);
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────
   return (
     <div
       style={{
@@ -571,6 +907,7 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
             <div style={{ marginLeft: "auto", textAlign: "right" }}>
               <div style={{ fontSize: 18, fontWeight: 800, color: T.lime }}>{bmi}</div>
               <div style={{ fontSize: 10, color: T.sub }}>BMI · {bmiCat}</div>
+              {profile.desiredWeight && <div style={{ fontSize: 10, color: T.purple }}>🎯 {profile.desiredWeight}kg goal</div>}
             </div>
           )}
         </div>
@@ -582,8 +919,10 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
         {/* ── DASHBOARD ── */}
         {tab === "dashboard" && (
           <div>
+            {/* Calorie ring summary */}
             <Card accent={calOver ? T.coral : T.lime}>
               <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+                {/* Circle */}
                 <svg width="90" height="90" viewBox="0 0 90 90">
                   <circle cx="45" cy="45" r="38" fill="none" stroke={T.border} strokeWidth="7" />
                   <circle
@@ -614,6 +953,7 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
+            {/* Overflow plan */}
             {overflowPlan && (
               <Card title="Recovery Plan" accent={T.coral}>
                 <div style={{ fontSize: 13, lineHeight: 1.7, color: T.sub, whiteSpace: "pre-wrap" }}>
@@ -622,6 +962,7 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               </Card>
             )}
 
+            {/* Today's log */}
             <Card title="Food Log">
               {foodLog.length === 0 ? (
                 <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "14px 0" }}>
@@ -654,6 +995,7 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
+            {/* Exercises today */}
             <Card title="Exercises Today">
               {exerciseLog.length === 0 ? (
                 <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "8px 0" }}>
@@ -673,6 +1015,7 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
         {/* ── LOG FOOD ── */}
         {tab === "log" && (
           <div>
+            {/* Drink picker */}
             <Card title="Add a Drink / Energy Drink">
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {DRINKS.map((d) => (
@@ -706,6 +1049,7 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
+            {/* Photo AI */}
             <Card title="📷 Snap & Track with AI">
               <div
                 onClick={() => fileRef.current.click()}
@@ -770,6 +1114,7 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
               )}
             </Card>
 
+            {/* Manual entry */}
             <Card title="Manual Entry">
               {["name", "cal", "protein", "carbs", "fat"].map((field) => (
                 <input
@@ -809,12 +1154,24 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
         {tab === "body" && (
           <div>
             <Card title="Select a Muscle to Train">
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12, padding:"8px 12px", background:T.surface, borderRadius:8, border:`1px solid ${T.border}` }}>
+                <span style={{ fontSize:18 }}>
+                  {profile.equipment === "gym" ? "🏋" : profile.equipment === "home" ? "🏠" : "🔀"}
+                </span>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:T.lime }}>
+                    {profile.equipment === "gym" ? "Gym Workouts" : profile.equipment === "home" ? "Home Workouts (no equipment)" : "Gym + Home Mix"}
+                  </div>
+                  <div style={{ fontSize:10, color:T.muted }}>Change in Profile tab</div>
+                </div>
+              </div>
               <div style={{ fontSize: 13, color: T.sub, marginBottom: 14 }}>
                 Tap a highlighted zone to get a personalised workout for that muscle group.
               </div>
               <BodySelector onSelect={handleMuscleSelect} sex={profile.sex} />
             </Card>
 
+            {/* Quick muscle buttons */}
             <Card title="Quick Select">
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {Object.entries(MUSCLE_GROUPS).map(([key, mg]) => (
@@ -830,64 +1187,203 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
         {/* ── WORKOUT ── */}
         {tab === "workout" && (
           <div>
-            {muscleSelected ? (
-              <Card title={`${MUSCLE_GROUPS[muscleSelected]?.label} Workout`} accent={T.blue}>
+            {/* Equipment badge + Sub-tabs */}
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12, padding:"8px 12px", background:T.surface, borderRadius:8, border:`1px solid ${T.border}` }}>
+              <span style={{ fontSize:16 }}>
+                {profile.equipment === "gym" ? "🏋" : profile.equipment === "home" ? "🏠" : "🔀"}
+              </span>
+              <span style={{ fontSize:12, color:T.sub }}>
+                {profile.equipment === "gym" ? "Gym mode" : profile.equipment === "home" ? "Home mode — no equipment needed" : "Gym + Home mix"}
+              </span>
+              <span
+                onClick={() => setTab("profile")}
+                style={{ marginLeft:"auto", fontSize:11, color:T.lime, cursor:"pointer", fontWeight:600 }}
+              >
+                Change →
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              {[{id:"ai",label:"💪 AI Workout"},{id:"custom",label:"✏️ Build My Own"}].map(t => (
+                <button key={t.id} onClick={() => setWorkoutTab(t.id)} style={{
+                  flex:1, padding:"10px 0", borderRadius:10, border:"none", cursor:"pointer",
+                  fontWeight:700, fontSize:13,
+                  background: workoutTab===t.id ? T.lime : T.card,
+                  color: workoutTab===t.id ? "#000" : T.sub,
+                  borderBottom: workoutTab===t.id ? "none" : `1px solid ${T.border}`,
+                }}>{t.label}</button>
+              ))}
+            </div>
+
+            {/* ── AI WORKOUT SUB-TAB ── */}
+            {workoutTab === "ai" && (
+              <div>
                 {workoutLoading ? (
-                  <div style={{ padding: "24px 0", textAlign: "center", color: T.sub }}>
-                    🤖 Building your workout plan...
+                  <Card accent={T.blue}>
+                    <div style={{padding:"28px 0",textAlign:"center",color:T.sub}}>
+                      <div style={{fontSize:28,marginBottom:10}}>⚡</div>
+                      Building your workout plan...
+                    </div>
+                  </Card>
+                ) : workoutExercises.length > 0 ? (
+                  <div>
+                    <Card title={`${MUSCLE_GROUPS[muscleSelected]?.label || ""} Workout`} accent={T.blue}>
+                      {workoutPlan && (
+                        <div style={{fontSize:13,lineHeight:1.7,color:T.lime,marginBottom:14,padding:"10px 12px",background:T.surface,borderRadius:8}}>
+                          🤖 {workoutPlan}
+                        </div>
+                      )}
+                      {workoutExercises.map((ex, i) => (
+                        <div key={i} style={{marginBottom:16,paddingBottom:16,borderBottom:`1px solid ${T.border}`}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                            <div>
+                              <div style={{fontWeight:700,fontSize:14}}>{ex.name}</div>
+                              <div style={{fontSize:12,color:T.lime,fontWeight:600}}>{ex.sets}</div>
+                            </div>
+                            <div style={{fontSize:10,color:T.muted,background:T.surface,padding:"3px 7px",borderRadius:6}}>Exercise {i+1}</div>
+                          </div>
+                          <div style={{fontSize:12,color:T.sub,marginBottom:8}}>💡 {ex.tip}</div>
+                          <a href={getVideoUrl(ex.name)} target="_blank" rel="noreferrer" style={{
+                            display:"inline-flex", alignItems:"center", gap:6,
+                            background:"#FF0000", color:"#fff", borderRadius:8,
+                            padding:"6px 12px", fontSize:12, fontWeight:700,
+                            textDecoration:"none", marginTop:4
+                          }}>
+                            ▶ Watch on YouTube
+                          </a>
+                        </div>
+                      ))}
+                      <div style={{display:"flex",gap:8,marginTop:4}}>
+                        <Btn small onClick={() => {
+                          const names = workoutExercises.map(e => `${e.name} ${e.sets} (${MUSCLE_GROUPS[muscleSelected]?.label || "Workout"})`);
+                          setExerciseLog(l => {
+                            const next = [...l, ...names];
+                            try { localStorage.setItem(exKey, JSON.stringify(next)); } catch {}
+                            return next;
+                          });
+                        }}>✓ Log this workout</Btn>
+                        <Btn small variant="ghost" onClick={() => {
+                          const w = { name: `${MUSCLE_GROUPS[muscleSelected]?.label} Workout`, exercises: workoutExercises, date: new Date().toLocaleDateString() };
+                          setSavedWorkouts(s => {
+                            const next = [w, ...s].slice(0, 10);
+                            try { localStorage.setItem("fittrack_saved_workouts", JSON.stringify(next)); } catch {}
+                            return next;
+                          });
+                        }}>💾 Save workout</Btn>
+                        <Btn small variant="ghost" onClick={() => { setMuscleSelected(null); setWorkoutExercises([]); setTab("body"); }}>
+                          Change
+                        </Btn>
+                      </div>
+                    </Card>
+
+                    {/* Saved workouts */}
+                    {savedWorkouts.length > 0 && (
+                      <Card title="Saved Workouts">
+                        {savedWorkouts.map((w, i) => (
+                          <div key={i} onClick={() => setWorkoutExercises(w.exercises)} style={{
+                            padding:"10px 12px", borderRadius:8, background:T.surface, marginBottom:8, cursor:"pointer",
+                            border:`1px solid ${T.border}`
+                          }}>
+                            <div style={{fontWeight:600,fontSize:13}}>{w.name}</div>
+                            <div style={{fontSize:11,color:T.muted}}>{w.date} · {w.exercises.length} exercises</div>
+                          </div>
+                        ))}
+                      </Card>
+                    )}
                   </div>
                 ) : (
-                  <>
-                    <div style={{ fontSize: 13, lineHeight: 1.8, color: T.sub, whiteSpace: "pre-wrap" }}>
-                      {workoutPlan}
+                  <Card>
+                    <div style={{textAlign:"center",padding:"28px 0"}}>
+                      <div style={{fontSize:32,marginBottom:10}}>💪</div>
+                      <div style={{fontSize:14,color:T.sub,marginBottom:14}}>
+                        Go to <strong style={{color:T.lime}}>Muscles</strong> and tap a body part to generate your workout
+                      </div>
+                      <Btn onClick={() => setTab("body")}>Select Muscle Group</Btn>
                     </div>
-                    <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
-                      <Btn
-                        small
-                        onClick={() => {
-                          const exercises = MUSCLE_GROUPS[muscleSelected]?.exercises || [];
-                          setExerciseLog((l) => [...l, ...exercises.slice(0, 3).map((e) => `${e} (${MUSCLE_GROUPS[muscleSelected]?.label})`)]);
-                        }}
-                      >
-                        ✓ Log this workout
-                      </Btn>
-                      <Btn small variant="ghost" onClick={() => { setMuscleSelected(null); setWorkoutPlan(""); setTab("body"); }}>
-                        Choose different
-                      </Btn>
-                    </div>
-                  </>
+                  </Card>
                 )}
-              </Card>
-            ) : (
-              <Card>
-                <div style={{ textAlign: "center", padding: "24px 0" }}>
-                  <div style={{ fontSize: 32, marginBottom: 10 }}>💪</div>
-                  <div style={{ fontSize: 14, color: T.sub }}>
-                    Go to <strong style={{ color: T.lime }}>Muscles</strong> and tap a body part to generate your workout
-                  </div>
-                  <Btn style={{ marginTop: 14 }} onClick={() => setTab("body")}>Select Muscle Group</Btn>
-                </div>
-              </Card>
+              </div>
             )}
 
-            {!muscleSelected && profile.goal && (
-              <Card title="Quick Suggestion" accent={T.purple}>
-                <div style={{ fontSize: 13, color: T.sub, marginBottom: 12 }}>
-                  Based on your goal: <strong style={{ color: T.lime }}>
-                    {profile.goal === "muscle" ? "Build Muscle" : profile.goal === "lose" ? "Lose Weight" : "Maintain"}
-                  </strong>
-                </div>
-                {(profile.goal === "muscle"
-                  ? ["Bench Press 4×8", "Pull-Ups 4×8", "Squats 4×10", "Overhead Press 3×10", "Deadlift 3×5"]
-                  : profile.goal === "lose"
-                  ? ["20 min HIIT", "Jump Rope 3×3min", "Burpees 3×15", "Mountain Climbers 3×30s", "Box Jumps 3×12"]
-                  : ["Full-body Circuit 3×12", "Jogging 20min", "Yoga 15min"]
-                ).map((e, i) => (
-                  <div key={i} style={{ fontSize: 13, padding: "6px 0", borderBottom: `1px solid ${T.border}` }}>
-                    {["🔥", "⚡", "💥", "🏋", "🎯"][i % 5]} {e}
+            {/* ── CUSTOM WORKOUT SUB-TAB ── */}
+            {workoutTab === "custom" && (
+              <div>
+                <Card title="Build Your Own Workout" accent={T.purple}>
+                  <div style={{fontSize:13,color:T.sub,marginBottom:12}}>
+                    Type what you want to train — e.g. "chest and triceps", "leg day", "full body HIIT", "back and biceps"
                   </div>
-                ))}
-              </Card>
+                  <textarea
+                    value={customInput}
+                    onChange={e => setCustomInput(e.target.value)}
+                    placeholder="e.g. I want to do chest and biceps today, I have dumbbells and a bench"
+                    rows={3}
+                    style={{
+                      width:"100%", boxSizing:"border-box",
+                      background:T.surface, border:`1px solid ${T.border}`,
+                      color:T.text, borderRadius:10, padding:"12px 14px",
+                      fontSize:13, outline:"none", resize:"none", marginBottom:10,
+                    }}
+                  />
+                  <Btn onClick={handleCustomWorkout} disabled={customLoading} style={{width:"100%"}}>
+                    {customLoading ? "Building your workout..." : "⚡ Generate Workout"}
+                  </Btn>
+                </Card>
+
+                {customPlan.length > 0 && (
+                  <Card title="Your Custom Workout" accent={T.lime}>
+                    {customPlan.map((ex, i) => (
+                      <div key={i} style={{marginBottom:16,paddingBottom:16,borderBottom:`1px solid ${T.border}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                          <div>
+                            <div style={{fontWeight:700,fontSize:14}}>{ex.name}</div>
+                            <div style={{fontSize:12,color:T.lime,fontWeight:600}}>{ex.sets}</div>
+                          </div>
+                        </div>
+                        {ex.tip && <div style={{fontSize:12,color:T.sub,marginBottom:8}}>💡 {ex.tip}</div>}
+                        <a href={getVideoUrl(ex.name)} target="_blank" rel="noreferrer" style={{
+                          display:"inline-flex", alignItems:"center", gap:6,
+                          background:"#FF0000", color:"#fff", borderRadius:8,
+                          padding:"6px 12px", fontSize:12, fontWeight:700,
+                          textDecoration:"none", marginTop:4
+                        }}>
+                          ▶ Watch on YouTube
+                        </a>
+                      </div>
+                    ))}
+                    <div style={{display:"flex",gap:8}}>
+                      <Btn small onClick={() => {
+                        const names = customPlan.map(e => `${e.name} ${e.sets}`);
+                        setExerciseLog(l => {
+                          const next = [...l, ...names];
+                          try { localStorage.setItem(exKey, JSON.stringify(next)); } catch {}
+                          return next;
+                        });
+                      }}>✓ Log this workout</Btn>
+                      <Btn small variant="ghost" onClick={() => {
+                        const w = { name: customInput.slice(0,30), exercises: customPlan, date: new Date().toLocaleDateString() };
+                        setSavedWorkouts(s => {
+                          const next = [w, ...s].slice(0, 10);
+                          try { localStorage.setItem("fittrack_saved_workouts", JSON.stringify(next)); } catch {}
+                          return next;
+                        });
+                      }}>💾 Save workout</Btn>
+                    </div>
+                  </Card>
+                )}
+
+                {savedWorkouts.length > 0 && (
+                  <Card title="Saved Workouts">
+                    {savedWorkouts.map((w, i) => (
+                      <div key={i} onClick={() => { setCustomPlan(w.exercises); }} style={{
+                        padding:"10px 12px", borderRadius:8, background:T.surface, marginBottom:8, cursor:"pointer",
+                        border:`1px solid ${T.border}`
+                      }}>
+                        <div style={{fontWeight:600,fontSize:13}}>{w.name}</div>
+                        <div style={{fontSize:11,color:T.muted}}>{w.date} · {w.exercises.length} exercises · tap to reload</div>
+                      </div>
+                    ))}
+                  </Card>
+                )}
+              </div>
             )}
           </div>
         )}
@@ -898,10 +1394,12 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
             <Card title="Your Profile">
               {[
                 { field: "name", label: "Name", type: "text", placeholder: "Your name" },
-                { field: "weight", label: "Weight (kg)", type: "number", placeholder: "75" },
+                { field: "weight", label: "Current Weight (kg)", type: "number", placeholder: "75" },
                 { field: "height", label: "Height (cm)", type: "number", placeholder: "175" },
                 { field: "age", label: "Age", type: "number", placeholder: "25" },
-                { field: "bodyFat", label: "Body Fat % (optional)", type: "number", placeholder: "20" },
+                { field: "bodyFat", label: "Current Body Fat % (optional)", type: "number", placeholder: "20" },
+                { field: "desiredWeight", label: "🎯 Desired Weight (kg)", type: "number", placeholder: "70" },
+                { field: "desiredBodyFat", label: "🎯 Desired Body Fat %", type: "number", placeholder: "15" },
               ].map(({ field, label, type, placeholder }) => (
                 <div key={field} style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 11, color: T.sub, display: "block", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em" }}>
@@ -924,13 +1422,26 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
 
               <div style={{ marginBottom: 12 }}>
                 <label style={{ fontSize: 11, color: T.sub, display: "block", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em" }}>Sex</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  {["male", "female"].map((s) => (
-                    <Btn key={s} small variant={profile.sex === s ? "primary" : "ghost"} onClick={() => setProfile((p) => ({ ...p, sex: s }))}>
-                      {s.charAt(0).toUpperCase() + s.slice(1)}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                  {[
+                    { v: "male", l: "Male" },
+                    { v: "female", l: "Female" },
+                    { v: "prefer_not", l: "Prefer not to say" },
+                  ].map(({ v, l }) => (
+                    <Btn key={v} small variant={profile.sex === v ? "primary" : "ghost"} onClick={() => setProfile((p) => ({ ...p, sex: v }))}>
+                      {l}
                     </Btn>
                   ))}
                 </div>
+                {profile.sex === "prefer_not" && (
+                  <div style={{
+                    fontSize: 12, lineHeight: 1.6, color: T.sub,
+                    background: T.surface, border: `1px solid ${T.border}`,
+                    borderRadius: 8, padding: "10px 12px",
+                  }}>
+                    ℹ️ For the most accurate calorie, macro and BMR targets, selecting <strong style={{ color: T.lime }}>Male</strong> or <strong style={{ color: T.lime }}>Female</strong> is recommended — biological sex affects how your body burns calories, processes nutrients and builds muscle at any given age and weight. Your choice is only used for calculations and is never shared.
+                  </div>
+                )}
               </div>
 
               <div style={{ marginBottom: 12 }}>
@@ -965,14 +1476,42 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
                 </div>
               </div>
 
-              <Btn onClick={() => setProfileSaved(true)} style={{ width: "100%" }}>Save Profile</Btn>
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, color: T.sub, display: "block", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em" }}>
+                  Where do you train?
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {[
+                    { v: "gym", l: "🏋 Gym", desc: "Full equipment" },
+                    { v: "home", l: "🏠 Home", desc: "No equipment" },
+                    { v: "both", l: "🔀 Both", desc: "Mix it up" },
+                  ].map(({ v, l, desc }) => (
+                    <div
+                      key={v}
+                      onClick={() => setProfile((p) => ({ ...p, equipment: v }))}
+                      style={{
+                        flex: 1, padding: "10px 8px", borderRadius: 10, cursor: "pointer", textAlign: "center",
+                        background: profile.equipment === v ? T.lime : T.surface,
+                        border: `1px solid ${profile.equipment === v ? T.lime : T.border}`,
+                      }}
+                    >
+                      <div style={{ fontSize: 16 }}>{l.split(" ")[0]}</div>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: profile.equipment === v ? "#000" : T.text }}>{l.split(" ")[1]}</div>
+                      <div style={{ fontSize: 10, color: profile.equipment === v ? "#333" : T.muted }}>{desc}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <Btn onClick={saveProfile} style={{ width: "100%" }}>Save Profile</Btn>
               {profileSaved && (
                 <div style={{ marginTop: 10, fontSize: 12, color: T.lime, textAlign: "center" }}>
-                  ✓ Profile saved
+                  ✓ Profile saved — workouts and targets updated
                 </div>
               )}
             </Card>
 
+            {/* Stats breakdown */}
             {bmi && (
               <Card title="Your Stats" accent={T.purple}>
                 {[
@@ -981,7 +1520,9 @@ Keep it supportive, direct, and actionable. Max 250 words.`;
                   { l: "Protein Target", v: `${proteinG}g/day` },
                   { l: "Carbs Target", v: `${carbsG}g/day` },
                   { l: "Fat Target", v: `${fatG}g/day` },
-                  ...(profile.bodyFat ? [{ l: "Body Fat", v: `${profile.bodyFat}%` }] : []),
+                  ...(profile.bodyFat ? [{ l: "Current Body Fat", v: `${profile.bodyFat}%` }] : []),
+                  ...(profile.desiredWeight ? [{ l: "🎯 Target Weight", v: `${profile.desiredWeight}kg ${profile.weight ? `(${(profile.weight - profile.desiredWeight) > 0 ? "-" : "+"}${Math.abs(profile.weight - profile.desiredWeight)}kg to go)` : ""}` }] : []),
+                  ...(profile.desiredBodyFat ? [{ l: "🎯 Target Body Fat", v: `${profile.desiredBodyFat}%${profile.bodyFat ? ` (${(profile.bodyFat - profile.desiredBodyFat).toFixed(1)}% to lose)` : ""}` }] : []),
                 ].map(({ l, v }) => (
                   <div key={l} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: `1px solid ${T.border}`, fontSize: 13 }}>
                     <span style={{ color: T.sub }}>{l}</span>
